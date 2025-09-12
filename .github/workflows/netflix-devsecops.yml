@@ -1,0 +1,291 @@
+name: Netflix DevSecOps Complete Pipeline
+
+on:
+  push:
+    branches: [ master, develop ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+env:
+  # All your credentials - READY TO GO!
+  DOCKER_IMAGE: "sincamelcosq/netflix"
+  DOCKER_USERNAME: "sincamelcosq"
+  DOCKER_TOKEN: "dckr_pat_Fo1QRb4iRReMJUPLKeEsfzy1SPs"
+  TMDB_V3_API_KEY: "6e4115a0ecbfcc96978f1556ba120fd6"
+  SONAR_TOKEN: "squ_4f4d56f3af2990d4f0d7063b1fb291ee7a1b56b7"
+  SONAR_HOST_URL: "http://184.169.217.89:9000"
+  SONAR_PROJECT_KEY: "netflix-clone-occ"
+  SERVER_IP: "184.169.217.89"
+
+jobs:
+  code-quality-analysis:
+    name: 🔍 Code Quality & SAST
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: 🔧 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '16'
+        cache: 'npm'
+        
+    - name: 📦 Install Dependencies
+      run: |
+        echo "📦 Installing dependencies for analysis..."
+        npm ci || npm install
+        
+    - name: 🔍 SonarQube SAST Analysis
+      uses: sonarqube-github-actions/sonarqube-scanner-action@master
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+      with:
+        args: >
+          -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }}
+          -Dsonar.sources=src/
+          -Dsonar.host.url=${{ env.SONAR_HOST_URL }}
+          -Dsonar.login=${{ env.SONAR_TOKEN }}
+          
+    - name: 🔒 OWASP Dependency Check (SCA)
+      uses: dependency-check/Dependency-Check_Action@main
+      with:
+        project: 'Netflix-DevSecOps'
+        path: '.'
+        format: 'XML,HTML,JSON'
+        out: 'reports'
+        args: '--enableRetired'
+        
+    - name: 📊 Upload OWASP Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: owasp-security-reports
+        path: reports/
+        retention-days: 30
+        
+    - name: 🛡️ Trivy Filesystem Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-fs-results.sarif'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        
+    - name: 📤 Upload Trivy SAST Results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-fs-results.sarif'
+
+  container-security-scan:
+    name: 🐳 Container Security Analysis
+    runs-on: ubuntu-latest
+    needs: code-quality-analysis
+    
+    steps:
+    - name: 🔑 Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ env.DOCKER_USERNAME }}
+        password: ${{ env.DOCKER_TOKEN }}
+        
+    - name: 📥 Pull Existing Docker Image
+      run: |
+        echo "📥 Pulling Jenkins-built Netflix image..."
+        docker pull ${{ env.DOCKER_IMAGE }}:latest
+        echo "✅ Image pulled successfully"
+        docker images | grep sincamelcosq/netflix
+        
+    - name: 🛡️ Trivy Container Security Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.DOCKER_IMAGE }}:latest
+        format: 'sarif'
+        output: 'trivy-container-results.sarif'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        
+    - name: 📤 Upload Container Scan Results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-container-results.sarif'
+
+  deploy-to-production:
+    name: 🚀 Production Deployment
+    runs-on: ubuntu-latest
+    needs: [code-quality-analysis, container-security-scan]
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    
+    steps:
+    - name: 🚀 Deploy Netflix via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ env.SERVER_IP }}
+        username: "ubuntu"
+        key: |
+          -----BEGIN OPENSSH PRIVATE KEY-----
+          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
+          -----END OPENSSH PRIVATE KEY-----
+        port: 22
+        timeout: 300
+        script: |
+          echo "🚀 Starting Netflix Production Deployment..."
+          echo "📅 Deployment Time: $(date)"
+          echo "🐳 Image: ${{ env.DOCKER_IMAGE }}:latest"
+          
+          # Ensure Docker is installed and running
+          if ! command -v docker &> /dev/null; then
+            echo "📦 Installing Docker..."
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            sudo sh get-docker.sh
+            sudo usermod -aG docker $USER
+            sudo systemctl start docker
+            sudo systemctl enable docker
+          fi
+          
+          # Stop existing Netflix container
+          echo "🛑 Stopping existing container..."
+          sudo docker stop netflix-app || true
+          sudo docker rm netflix-app || true
+          
+          # Clean up old images (keep space optimized)
+          sudo docker image prune -f
+          
+          # Pull latest image
+          echo "📥 Pulling latest Netflix image..."
+          sudo docker pull ${{ env.DOCKER_IMAGE }}:latest
+          
+          # Deploy new container with health checks
+          echo "🏃 Deploying Netflix container..."
+          sudo docker run -d \
+            --name netflix-app \
+            -p 8082:3000 \
+            -p 80:3000 \
+            --restart unless-stopped \
+            --health-cmd="curl -f http://localhost:3000 || exit 1" \
+            --health-interval=30s \
+            --health-timeout=10s \
+            --health-retries=3 \
+            --health-start-period=40s \
+            --memory="512m" \
+            --cpus="0.5" \
+            -e REACT_APP_TMDB_V3_API_KEY=${{ env.TMDB_V3_API_KEY }} \
+            ${{ env.DOCKER_IMAGE }}:latest
+            
+          # Wait for container health check
+          echo "⏳ Waiting for container to be healthy..."
+          sleep 45
+          
+          # Verify deployment
+          if sudo docker ps | grep -q netflix-app; then
+            echo "✅ Netflix deployed successfully!"
+            echo ""
+            echo "🌐 APPLICATION URLS:"
+            echo "   • Primary: http://184.169.217.89:8082"
+            echo "   • Secondary: http://184.169.217.89"
+            echo ""
+            echo "📊 MONITORING:"
+            echo "   • SonarQube: http://184.169.217.89:9000"
+            echo "   • Docker Hub: https://hub.docker.com/r/sincamelcosq/netflix"
+            echo ""
+            
+            # Container status
+            sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep netflix-app
+            
+            # Health check
+            sleep 10
+            curl -s -o /dev/null -w "Health Check Status: %{http_code}\n" http://localhost:8082 || echo "Still starting up..."
+            
+          else
+            echo "❌ Deployment failed!"
+            sudo docker logs netflix-app
+            exit 1
+          fi
+
+  notification:
+    name: 📧 Deployment Notification
+    runs-on: ubuntu-latest
+    needs: [code-quality-analysis, container-security-scan, deploy-to-production]
+    if: always()
+    
+    steps:
+    - name: 📧 Send Deployment Status
+      run: |
+        echo "=============================================="
+        echo "🎬 NETFLIX DEVSECOPS DEPLOYMENT COMPLETE"
+        echo "=============================================="
+        echo ""
+        echo "📅 Deployment Date: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "🔄 Pipeline Status: ${{ job.status }}"
+        echo "🏗️ Triggered by: ${{ github.actor }}"
+        echo "📝 Commit: ${{ github.sha }}"
+        echo ""
+        
+        if [[ "${{ needs.deploy-to-production.result }}" == "success" ]]; then
+          echo "✅ PRODUCTION DEPLOYMENT: SUCCESS"
+          echo "🌐 Netflix App: http://184.169.217.89:8082"
+          echo "📊 SonarQube: http://184.169.217.89:9000"
+          echo "🐳 Docker Image: sincamelcosq/netflix:latest"
+          echo ""
+          echo "🔐 SECURITY SCANS COMPLETED:"
+          echo "   • SAST (SonarQube): ✅"
+          echo "   • SCA (OWASP): ✅"  
+          echo "   • Container Scan (Trivy): ✅"
+        else
+          echo "❌ DEPLOYMENT: FAILED"
+          echo "🔍 Check workflow logs for details"
+        fi
+        echo "=============================================="
